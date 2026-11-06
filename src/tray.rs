@@ -86,6 +86,11 @@ fn make_tray() -> hbb_common::ResultType<()> {
     let password_i = MenuItem::new("One-time password: …", false, None);
     let set_password_i = MenuItem::new("Set permanent password…", true, None);
     let set_server_i = MenuItem::new("Set ID server…", true, None);
+    let install_i = MenuItem::new("Install background service…", true, None);
+    #[cfg(target_os = "macos")]
+    let show_install = window_less && !crate::platform::macos::is_installed_daemon(false);
+    #[cfg(not(target_os = "macos"))]
+    let show_install = false;
     if window_less {
         tray_menu
             .append_items(&[&id_i, &password_i, &PredefinedMenuItem::separator()])
@@ -94,6 +99,9 @@ fn make_tray() -> hbb_common::ResultType<()> {
     tray_menu.append(&open_i).ok();
     if window_less {
         tray_menu.append_items(&[&set_password_i, &set_server_i]).ok();
+    }
+    if show_install {
+        tray_menu.append(&install_i).ok();
     }
     if let Some(quit_i) = &quit_i {
         tray_menu.append(quit_i).ok();
@@ -254,6 +262,8 @@ fn make_tray() -> hbb_common::ResultType<()> {
                     std::thread::spawn(no_metal::set_permanent_password);
                 } else if event.id == set_server_i.id() {
                     std::thread::spawn(no_metal::set_id_server);
+                } else if event.id == install_i.id() {
+                    std::thread::spawn(no_metal::install_service);
                 }
             }
             // Tether: clicking a per-connection entry asks the service to show that
@@ -473,6 +483,12 @@ pub mod no_metal {
              Use the Tether icon in the menu bar to set a permanent password \
              or the ID server."
         );
+        let text = if crate::platform::macos::is_installed_daemon(false) {
+            text
+        } else {
+            text + "\n\nTo start Tether automatically when this Mac starts, choose \
+                    \"Install background service…\" in the menu bar."
+        };
         match dialog(&text, None, &["Copy password", "Copy ID", "OK"]) {
             Some((b, _)) if b == "Copy ID" => copy(&id),
             Some((b, _)) if b == "Copy password" => copy(&password),
@@ -513,6 +529,21 @@ pub mod no_metal {
             Ok(()) => message("The permanent password was set."),
             Err(err) => message(&format!("Failed to set the password: {err}")),
         }
+    }
+
+    /// Shown only when the service isn't installed, so this process is a
+    /// manually started `--server`. After installing, exit so the service's
+    /// own `--server` (launchd retries it every second) takes over.
+    pub fn install_service() {
+        if !crate::platform::macos::install_daemon_and_wait() {
+            message("The background service was not installed.");
+            return;
+        }
+        message(
+            "The background service is installed. Tether now starts automatically \
+             when this Mac starts.",
+        );
+        std::process::exit(0);
     }
 
     pub fn set_id_server() {

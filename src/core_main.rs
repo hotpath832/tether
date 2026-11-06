@@ -405,6 +405,16 @@ pub fn core_main() -> Option<Vec<String>> {
             return None;
         } else if args[0] == "--install-service" {
             log::info!("start --install-service");
+            // Tether: on macOS `install_service()` only checks, so prompt for
+            // admin rights and install the daemon + agent here (the Flutter UI
+            // normally does this, but Macs without Metal have no window).
+            #[cfg(target_os = "macos")]
+            if crate::platform::macos::install_daemon_and_wait() {
+                println!("The Tether service is installed and starts at login.");
+            } else {
+                println!("The Tether service was not installed.");
+            }
+            #[cfg(not(target_os = "macos"))]
             crate::platform::install_service();
             return None;
         } else if args[0] == "--uninstall-service" {

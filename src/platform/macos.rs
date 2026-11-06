@@ -227,7 +227,20 @@ pub fn is_installed_daemon(prompt: bool) -> bool {
         }
         return true;
     }
+    install_daemon(false)
+}
 
+/// Tether: like `is_installed_daemon(true)`, but runs the admin prompt and the
+/// agent load on this thread and returns whether the service ended up
+/// installed. For callers without the Flutter UI: the window-less menu bar
+/// (no Metal) and `--install-service`.
+pub fn install_daemon_and_wait() -> bool {
+    is_installed_daemon(false) || install_daemon(true)
+}
+
+fn install_daemon(wait: bool) -> bool {
+    let agent = format!("{}_server.plist", crate::get_full_name());
+    let agent_plist_file = format!("/Library/LaunchAgents/{}", agent);
     let Some(install_script) = PRIVILEGES_SCRIPTS_DIR.get_file("install.scpt") else {
         return false;
     };
@@ -249,7 +262,7 @@ pub fn is_installed_daemon(prompt: bool) -> bool {
         return false;
     };
 
-    std::thread::spawn(move || {
+    let install = move || {
         match std::process::Command::new("osascript")
             .arg("-e")
             .arg(install_script_body)
@@ -260,6 +273,7 @@ pub fn is_installed_daemon(prompt: bool) -> bool {
         {
             Err(e) => {
                 log::error!("run osascript failed: {}", e);
+                false
             }
             _ => {
                 let installed = std::path::Path::new(&agent_plist_file).exists();
@@ -271,9 +285,14 @@ pub fn is_installed_daemon(prompt: bool) -> bool {
                         .status()
                         .ok();
                 }
+                installed
             }
         }
-    });
+    };
+    if wait {
+        return install();
+    }
+    std::thread::spawn(install);
     false
 }
 
