@@ -46,6 +46,10 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update -y
+          # The runner image ships libunwind-14-dev, which blocks libunwind-dev
+          # (needed by libgstreamer1.0-dev).
+          sudo apt-get remove -y libunwind-14-dev || true
+          sudo apt-get install -y libunwind-dev
           sudo apt-get install -y \
             build-essential clang cmake curl gcc g++ git nasm ninja-build pkg-config \
             autoconf automake libtool python3 rpm unzip wget xz-utils zip \
