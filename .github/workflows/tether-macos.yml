@@ -22,7 +22,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14      # Apple Silicon
+          - os: macos-15      # Apple Silicon (macos-14 runners were retired)
             arch: arm64
             triplet: arm64-osx
             name: arm64
