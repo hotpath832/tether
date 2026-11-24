@@ -659,6 +659,39 @@ pub fn session_input_string(session_id: SessionID, value: String) {
     }
 }
 
+// Tether: auto type. `error_rate` is the chance per character of a typo (0..1).
+// Progress comes back as "auto_type" session events.
+pub fn session_auto_type_start(
+    session_id: SessionID,
+    text: String,
+    wpm: f64,
+    error_rate: f64,
+    start_delay: i32,
+    think_pauses: bool,
+) {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    crate::auto_type::start(
+        session_id,
+        &text,
+        crate::auto_type::Settings {
+            wpm,
+            error_rate,
+            start_delay: start_delay.max(0) as u32,
+            think_pauses,
+        },
+    );
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let _ = (session_id, text, wpm, error_rate, start_delay, think_pauses);
+}
+
+// `action`: "pause", "resume" or "stop".
+pub fn session_auto_type_control(session_id: SessionID, action: String) {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    crate::auto_type::control(session_id, &action);
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let _ = (session_id, action);
+}
+
 // chat_client_mode
 pub fn session_send_chat(session_id: SessionID, text: String) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
@@ -1751,6 +1784,65 @@ pub fn main_get_software_update_url() {
     crate::common::check_software_update();
 }
 
+/// Tether: Claude control (MCP) status as JSON for the settings page.
+pub fn main_mcp_info() -> SyncReturn<String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    return SyncReturn(crate::mcp_server::info().to_string());
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    SyncReturn("{}".to_owned())
+}
+
+/// Tether: turn Claude control on/off; returns the new status JSON.
+pub fn main_mcp_set_enabled(enabled: bool) -> SyncReturn<String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    return SyncReturn(crate::mcp_server::set_enabled(enabled).to_string());
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = enabled;
+        SyncReturn("{}".to_owned())
+    }
+}
+
+/// Tether: replace the Claude control token (clients must be set up again).
+pub fn main_mcp_new_token() -> SyncReturn<String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        crate::mcp_server::new_token();
+        if crate::mcp_server::info()["running"] == true {
+            crate::mcp_server::stop();
+            crate::mcp_server::start();
+        }
+        return SyncReturn(crate::mcp_server::info().to_string());
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    SyncReturn("{}".to_owned())
+}
+
+/// Tether: start Claude control at app start when it is turned on.
+pub fn main_mcp_start_if_enabled() {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    crate::mcp_server::start_if_enabled();
+}
+
+/// Tether: "Check for updates" in Settings. Returns the new version, "" when
+/// up to date, or "error:<reason>" (including "error:no-server").
+pub fn main_tether_check_update() -> String {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        if crate::tether_update::update_server().is_empty() {
+            return "error:no-server".to_owned();
+        }
+        return match crate::common::do_check_software_update() {
+            Ok(()) => crate::tether_update::latest()
+                .map(|r| r.version)
+                .unwrap_or_default(),
+            Err(e) => format!("error:{e}"),
+        };
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    "error:unsupported".to_owned()
+}
+
 pub fn main_get_home_dir() -> String {
     fs::get_home_as_string()
 }
@@ -2477,7 +2569,10 @@ pub fn is_disable_ab() -> SyncReturn<bool> {
 }
 
 pub fn is_disable_account() -> SyncReturn<bool> {
-    SyncReturn(config::is_disable_account())
+    // Tether: no account login. Tether runs on its own ID/relay server, so the
+    // Settings > Account tab, the toolbar login, the address book / group tabs
+    // and the end-of-session note (all gated on this) are always hidden.
+    SyncReturn(true)
 }
 
 pub fn is_disable_group_panel() -> SyncReturn<bool> {
@@ -2845,6 +2940,32 @@ pub fn main_get_common(key: String) -> String {
                     format!("error:{}", e)
                 }
             }
+        } else if key == "tether-update-url" {
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            return crate::tether_update::latest()
+                .map(|r| r.url)
+                .unwrap_or_default();
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            return String::new();
+        } else if key.starts_with("verify-update:") {
+            // Tether: "" when the downloaded installer matches the signed
+            // release from the update server, else the reason it doesn't.
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            {
+                let url = key.trim_start_matches("verify-update:");
+                let Some(path) = crate::updater::get_download_file_from_url(url) else {
+                    return "Invalid download url".to_owned();
+                };
+                return match crate::tether_update::verify_download(url, &path) {
+                    Ok(()) => String::new(),
+                    Err(e) => {
+                        std::fs::remove_file(&path).ok();
+                        e.to_string()
+                    }
+                };
+            }
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            return "unsupported".to_owned();
         } else if key.starts_with("download-file-") {
             let _version = key.replace("download-file-", "");
             #[cfg(target_os = "windows")]
@@ -2952,6 +3073,12 @@ pub fn main_set_common(_key: String, _value: String) {
             );
         } else if _key == "update-me" {
             if let Some(new_version_file) = get_download_file_from_url(&_value) {
+                // Tether: never run an installer that isn't the signed release.
+                if let Err(e) = crate::tether_update::verify_download(&_value, &new_version_file) {
+                    log::error!("Refusing to install {:?}: {}", new_version_file, e);
+                    std::fs::remove_file(&new_version_file).ok();
+                    return;
+                }
                 log::debug!(
                     "New version file is downloaded, update begin, {:?}",
                     new_version_file.to_str()

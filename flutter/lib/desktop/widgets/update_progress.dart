@@ -9,19 +9,11 @@ import 'package:url_launcher/url_launcher.dart';
 
 final _isExtracting = false.obs;
 
-void handleUpdate(String releasePageUrl) {
+// Tether: `downloadUrl` is the installer URL from the update server's
+// latest.json (see src/tether_update.rs), not a GitHub release page.
+void handleUpdate(String downloadUrl) {
   _isExtracting.value = false;
-  String downloadUrl = releasePageUrl.replaceAll('tag', 'download');
-  String version = downloadUrl.substring(downloadUrl.lastIndexOf('/') + 1);
-  final String downloadFile =
-      bind.mainGetCommonSync(key: 'download-file-$version');
-  if (downloadFile.startsWith('error:')) {
-    final error = downloadFile.replaceFirst('error:', '');
-    msgBox(gFFI.sessionId, 'custom-nocancel-nook-hasclose', 'Error', error,
-        releasePageUrl, gFFI.dialogManager);
-    return;
-  }
-  downloadUrl = '$downloadUrl/$downloadFile';
+  final releasePageUrl = downloadUrl;
 
   SimpleWrapper downloadId = SimpleWrapper('');
   SimpleWrapper<VoidCallback> onCanceled = SimpleWrapper(() {});
@@ -217,7 +209,14 @@ class UpdateProgressState extends State<UpdateProgress> {
                 key: 'extract-update-dmg', value: widget.downloadUrl);
             _isExtracting.value = true;
           } else {
-            updateMsgBox();
+            // Tether: run only the signed release (checksum + signature).
+            final err = bind.mainGetCommonSync(
+                key: 'verify-update:${widget.downloadUrl}');
+            if (err.isNotEmpty) {
+              _onError(err);
+            } else {
+              updateMsgBox();
+            }
           }
         }
       } else {

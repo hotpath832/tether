@@ -8,6 +8,7 @@ import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/common/widgets/dialog.dart';
 import 'package:flutter_hbb/common/widgets/login.dart';
 import 'package:flutter_hbb/consts.dart';
+import 'package:flutter_hbb/desktop/widgets/auto_type.dart';
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
@@ -411,6 +412,15 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
           }
           await sendClipboardKeystrokes();
         }));
+  }
+  // Tether: auto type (Windows client)
+  if (isWindows &&
+      isDefaultConn &&
+      pi.platform != kPeerPlatformAndroid &&
+      perms['keyboard'] != false) {
+    v.add(TTextMenu(
+        child: Text(translate('Auto type')),
+        onPressed: () => showAutoTypeDialog(ffi)));
   }
   if (isDefaultConn &&
       isWaylandPeer &&

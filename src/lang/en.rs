@@ -279,5 +279,8 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("wayland-soft-keyboard-input-label", "Soft keyboard input"),
         ("wayland-keyboard-input-reset-choice-tip", "Reset keyboard input choice"),
         ("remember-wayland-keyboard-choice-tip", "Don't ask again for this remote computer"),
+        ("claude-control-tip", "Claude Code or Claude Desktop on this computer can then see and operate the remote computers you have open in Tether: screenshots, mouse and keyboard, performed like a person. Only programs on this computer with the token can connect. Turn it off to stop Claude immediately."),
+        ("tether-update-tip", "The update server is a web address that holds latest.json and the installers. Tether only installs updates signed with its release key, so a wrong or changed server can't install anything else. Auto update installs in the background when no session is open."),
+        ("auto-type-tip", "Click where the text should go on the remote computer first. After the start delay, the text is typed key by key like a person, with natural timing and occasional typos that get corrected. The keys use this computer's keyboard layout."),
     ].iter().cloned().collect();
 }

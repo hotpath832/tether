@@ -481,6 +481,23 @@ class RustdeskImpl {
         () => js.context.callMethod('setByName', ['input_string', value]));
   }
 
+  // Tether: auto type is not available on the web client.
+  Future<void> sessionAutoTypeStart(
+      {required UuidValue sessionId,
+      required String text,
+      required double wpm,
+      required double errorRate,
+      required int startDelay,
+      required bool thinkPauses,
+      dynamic hint}) {
+    return Future.value();
+  }
+
+  Future<void> sessionAutoTypeControl(
+      {required UuidValue sessionId, required String action, dynamic hint}) {
+    return Future.value();
+  }
+
   Future<void> sessionSendChat(
       {required UuidValue sessionId, required String text, dynamic hint}) {
     return Future(
@@ -1145,6 +1162,15 @@ class RustdeskImpl {
 
   Future<void> mainGetSoftwareUpdateUrl({dynamic hint}) {
     throw UnimplementedError("mainGetSoftwareUpdateUrl");
+  }
+
+  String mainMcpInfo({dynamic hint}) => '{}';
+  String mainMcpSetEnabled({required bool enabled, dynamic hint}) => '{}';
+  String mainMcpNewToken({dynamic hint}) => '{}';
+  Future<void> mainMcpStartIfEnabled({dynamic hint}) => Future.value();
+
+  Future<String> mainTetherCheckUpdate({dynamic hint}) {
+    return Future.value('error:unsupported');
   }
 
   Future<String> mainGetHomeDir({dynamic hint}) {

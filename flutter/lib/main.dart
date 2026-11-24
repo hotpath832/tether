@@ -137,6 +137,8 @@ void runMainApp(bool startService) async {
   // register uni links
   await initEnv(kAppTypeMain);
   checkUpdate();
+  // Tether: Claude control (MCP), when turned on in Settings.
+  if (isDesktop) bind.mainMcpStartIfEnabled();
   // trigger connection status updater
   await bind.mainCheckConnectStatus();
   if (startService) {

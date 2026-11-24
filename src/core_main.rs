@@ -59,6 +59,12 @@ pub fn core_main() -> Option<Vec<String>> {
         // return None to terminate the process
         return None;
     }
+    // Tether: `--mcp` is the stdio bridge for Claude Desktop (see mcp_server.rs).
+    #[cfg(all(feature = "flutter", not(any(target_os = "android", target_os = "ios"))))]
+    if std::env::args().nth(1).as_deref() == Some("--mcp") {
+        crate::mcp_server::run_stdio_bridge();
+        return None;
+    }
     let mut args = Vec::new();
     let mut flutter_args = Vec::new();
     let mut i = 0;

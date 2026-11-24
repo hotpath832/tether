@@ -23,7 +23,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::common::SOFTWARE_UPDATE_URL;
 #[cfg(feature = "flutter")]
 use crate::hbbs_http::account;
 #[cfg(not(any(target_os = "ios")))]
@@ -748,13 +747,13 @@ pub fn current_is_wayland() -> bool {
 
 #[inline]
 pub fn get_new_version() -> String {
-    (*SOFTWARE_UPDATE_URL
-        .lock()
-        .unwrap()
-        .rsplit('/')
-        .next()
-        .unwrap_or(""))
-    .to_string()
+    // Tether: the version comes from the update server's latest.json.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    return crate::tether_update::latest()
+        .map(|r| r.version)
+        .unwrap_or_default();
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    return String::new();
 }
 
 #[inline]

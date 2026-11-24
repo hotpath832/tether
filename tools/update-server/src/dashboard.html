@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tether Update Server</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #ffffff; --text: #1d2330; --muted: #69707d; --line: #e3e6eb;
+    --accent: #2563eb; --accent-soft: #e8efff; --ok: #15803d; --ok-soft: #e7f6ec;
+    --danger: #c2410c; --danger-soft: #fdeee6; --bar2: #93b4f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1b1f27; --text: #e6e8ec; --muted: #9aa1ad; --line: #2b313c;
+      --accent: #6c9bff; --accent-soft: #1f2b45; --ok: #4ade80; --ok-soft: #173225;
+      --danger: #fb923c; --danger-soft: #3a2418; --bar2: #3d5a99;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 28px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .live { color: var(--muted); }
+  header .spacer { flex: 1; }
+  nav { display: flex; gap: 4px; padding: 0 28px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  nav button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 10px 14px; color: var(--muted); font: inherit; cursor: pointer; }
+  nav button.on { color: var(--text); border-bottom-color: var(--accent); }
+  main { max-width: 1080px; margin: 0 auto; padding: 24px 28px 60px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px; margin-bottom: 18px; }
+  .panel h2 { font-size: 15px; margin: 0 0 4px; }
+  .panel p.sub { margin: 0 0 16px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr:last-child td { border-bottom: 0; }
+  .chip { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 12px; margin: 0 4px 4px 0; white-space: nowrap; }
+  .badge-live { background: var(--ok-soft); color: var(--ok); font-weight: 600; }
+  button.btn { font: inherit; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 6px 12px; cursor: pointer; }
+  button.btn:hover { border-color: var(--muted); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=password], input[type=text] { font: inherit; padding: 8px 10px; border-radius: 7px; border: 1px solid var(--line); background: var(--bg); color: var(--text); width: 100%; max-width: 360px; }
+  label.field { display: block; margin-bottom: 12px; }
+  label.field span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .msg { margin-top: 10px; min-height: 1.5em; }
+  .msg.err { color: var(--danger); }
+  .msg.ok { color: var(--ok); }
+  .drop { border: 2px dashed var(--line); border-radius: 10px; padding: 28px; text-align: center; color: var(--muted); cursor: pointer; }
+  .drop.over { border-color: var(--accent); background: var(--accent-soft); }
+  .files { margin: 12px 0; }
+  .progress { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; margin-top: 12px; display: none; }
+  .progress div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 18px; }
+  .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .tile .k { color: var(--muted); font-size: 12px; }
+  .tile .v { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .chart { display: flex; align-items: flex-end; gap: 2px; height: 160px; padding-top: 8px; }
+  .chart .col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; gap: 1px; min-width: 2px; height: 100%; }
+  .chart .b1 { background: var(--accent); border-radius: 2px 2px 0 0; }
+  .chart .b2 { background: var(--bar2); border-radius: 2px 2px 0 0; }
+  .legend { display: flex; gap: 16px; color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .axis { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-top: 4px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
+  code, .mono { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+  .tokenbox { padding: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 7px; word-break: break-all; margin: 8px 0; }
+  .note { background: var(--accent-soft); border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; }
+  .warn { background: var(--danger-soft); color: var(--danger); border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; }
+  #login { max-width: 360px; margin: 12vh auto; }
+  .hidden { display: none !important; }
+  .row-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .empty { color: var(--muted); padding: 18px 0; text-align: center; }
+</style>
+</head>
+<body>
+
+<div id="login" class="panel hidden">
+  <h2>Tether Update Server</h2>
+  <p class="sub">Sign in to manage releases.</p>
+  <form id="loginForm">
+    <label class="field"><span>Admin password</span><input type="password" id="loginPw" autocomplete="current-password" autofocus></label>
+    <button class="btn primary" type="submit">Sign in</button>
+    <div class="msg err" id="loginMsg"></div>
+  </form>
+</div>
+
+<div id="app" class="hidden">
+  <header>
+    <h1>Tether Update Server</h1>
+    <span class="live" id="liveLabel"></span>
+    <span class="spacer"></span>
+    <button class="btn" id="logoutBtn">Sign out</button>
+  </header>
+  <nav>
+    <button data-tab="releases" class="on">Releases</button>
+    <button data-tab="upload">Upload</button>
+    <button data-tab="stats">Statistics</button>
+    <button data-tab="settings">Settings</button>
+  </nav>
+  <main>
+    <div id="initWarn" class="warn hidden">You are using the generated first-run password. Change it under Settings.</div>
+
+    <section id="tab-releases">
+      <div class="panel">
+        <h2>Releases</h2>
+        <p class="sub">Clients are offered the <b>live</b> release when it is newer than what they run.
+          Making an older release live (or unpublishing) stops offering a bad update, but installs that
+          already updated keep it. To fix those, publish a newer version.</p>
+        <div id="releasesBox"></div>
+        <div style="margin-top:14px"><button class="btn danger" id="unpublishBtn">Unpublish live release</button></div>
+        <div class="msg" id="relMsg"></div>
+      </div>
+    </section>
+
+    <section id="tab-upload" class="hidden">
+      <div class="panel">
+        <h2>Upload a release</h2>
+        <p class="sub">Select the release folder's files made by <code>res/tether_release.py sign</code>:
+          <code>latest.json</code> and the installer(s). Uploads that aren't signed with Tether's release key are refused.</p>
+        <div class="drop" id="drop">Drop files here or click to choose</div>
+        <input type="file" id="fileInput" multiple class="hidden">
+        <div class="files" id="fileList"></div>
+        <label><input type="checkbox" id="makeLive" checked> Make live after upload</label>
+        <div style="margin-top:12px"><button class="btn primary" id="uploadBtn" disabled>Upload</button></div>
+        <div class="progress" id="prog"><div></div></div>
+        <div class="msg" id="upMsg"></div>
+      </div>
+    </section>
+
+    <section id="tab-stats" class="hidden">
+      <div style="margin-bottom:12px">
+        Range:
+        <select id="range" class="btn">
+          <option value="7">Last 7 days</option>
+          <option value="30" selected>Last 30 days</option>
+          <option value="90">Last 90 days</option>
+          <option value="365">Last year</option>
+        </select>
+      </div>
+      <div class="tiles" id="tiles"></div>
+      <div class="panel">
+        <h2>Activity per day</h2>
+        <div class="chart" id="chart"></div>
+        <div class="axis" id="axis"></div>
+        <div class="legend"><span><i style="background:var(--accent)"></i>Update checks</span><span><i style="background:var(--bar2)"></i>Downloads</span></div>
+      </div>
+      <div class="grid2">
+        <div class="panel"><h2>Checks by client version</h2><p class="sub">Each running Tether checks about once a day, so today's numbers approximate installs per version.</p><div id="byVersion"></div></div>
+        <div class="panel"><h2>Checks by platform</h2><div id="byPlatform"></div></div>
+      </div>
+      <div class="panel"><h2>Downloads by file</h2><div id="byFile"></div></div>
+    </section>
+
+    <section id="tab-settings" class="hidden">
+      <div class="panel">
+        <h2>Connect Tether to this server</h2>
+        <p class="sub">In Tether: Settings → General → Update → Update server, enter:</p>
+        <div class="tokenbox mono" id="serverUrl"></div>
+        <div id="tlsNote" class="note hidden">This server runs without HTTPS. Updates are still safe (they are signed),
+          but the admin password travels unencrypted. Add a certificate in <code>data\server.json</code> for production.</div>
+      </div>
+      <div class="panel">
+        <h2>Upload token</h2>
+        <p class="sub">Lets <code>res/tether_release.py upload</code> publish releases without the dashboard. Generating a new token revokes the old one.</p>
+        <button class="btn" id="tokenBtn">Generate new token</button>
+        <div id="tokenOut" class="hidden">
+          <div class="tokenbox mono" id="tokenVal"></div>
+          <div class="sub" style="color:var(--muted)">Copy it now; it is not shown again.</div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Admin password</h2>
+        <form id="pwForm">
+          <label class="field"><span>Current password</span><input type="password" id="pwOld" autocomplete="current-password"></label>
+          <label class="field"><span>New password (10+ characters)</span><input type="password" id="pwNew" autocomplete="new-password"></label>
+          <label class="field"><span>Repeat new password</span><input type="password" id="pwNew2" autocomplete="new-password"></label>
+          <button class="btn primary" type="submit">Change password</button>
+          <div class="msg" id="pwMsg"></div>
+        </form>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtSize = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : n >= 1024 ? (n / 1024).toFixed(0) + ' KB' : n + ' B';
+const fmtNum = (n) => Number(n).toLocaleString();
+
+async function api(path, opts = {}) {
+  const r = await fetch('/admin/api/' + path, { credentials: 'same-origin', ...opts });
+  let body = {};
+  try { body = await r.json(); } catch (_) {}
+  if (r.status === 401 && path !== 'login') { showLogin(); }
+  if (!r.ok) throw new Error(body.error || ('HTTP ' + r.status));
+  return body;
+}
+const postJson = (path, data) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data || {}) });
+
+function setMsg(el, text, ok) { el.textContent = text || ''; el.className = 'msg ' + (ok ? 'ok' : 'err'); }
+
+function showLogin() { $('#app').classList.add('hidden'); $('#login').classList.remove('hidden'); $('#loginPw').focus(); }
+
+async function boot() {
+  const me = await api('me');
+  if (!me.authed) return showLogin();
+  $('#login').classList.add('hidden');
+  $('#app').classList.remove('hidden');
+  $('#initWarn').classList.toggle('hidden', !me.initial_password);
+  $('#tlsNote').classList.toggle('hidden', me.tls);
+  $('#serverUrl').textContent = location.origin;
+  loadReleases();
+}
+
+$('#loginForm').onsubmit = async (e) => {
+  e.preventDefault();
+  try { await postJson('login', { password: $('#loginPw').value }); $('#loginPw').value = ''; setMsg($('#loginMsg'), ''); boot(); }
+  catch (err) { setMsg($('#loginMsg'), err.message); }
+};
+$('#logoutBtn').onclick = async () => { await postJson('logout'); showLogin(); };
+
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
+  document.querySelectorAll('main > section').forEach(s => s.classList.toggle('hidden', s.id !== 'tab-' + b.dataset.tab));
+  if (b.dataset.tab === 'releases') loadReleases();
+  if (b.dataset.tab === 'stats') loadStats();
+});
+
+// ---------------------------------------------------------------- releases
+async function loadReleases() {
+  let d;
+  try { d = await api('releases'); } catch (e) { return; }
+  $('#liveLabel').textContent = d.live ? 'Live: ' + d.live : 'No live release';
+  $('#unpublishBtn').disabled = !d.live;
+  if (!d.releases.length) { $('#releasesBox').innerHTML = '<div class="empty">No releases yet. Upload one in the Upload tab.</div>'; return; }
+  const rows = d.releases.map(r => {
+    const live = r.version === d.live;
+    const plats = Object.entries(r.platforms).map(([p, f]) =>
+      `<span class="chip" title="${esc(f.file)} · sha256 ${esc(f.sha256)}">${esc(p)} · ${fmtSize(f.size)}</span>`).join('');
+    return `<tr>
+      <td><b>${esc(r.version)}</b>${live ? ' <span class="chip badge-live">LIVE</span>' : ''}</td>
+      <td>${plats}</td>
+      <td>${esc(r.uploaded_at)}</td>
+      <td>${esc(r.notes) || '<span style="color:var(--muted)">-</span>'}</td>
+      <td><div class="row-actions">
+        ${live ? '' : `<button class="btn" data-live="${esc(r.version)}">Make live</button>
+        <button class="btn danger" data-del="${esc(r.version)}">Delete</button>`}
+      </div></td></tr>`;
+  }).join('');
+  $('#releasesBox').innerHTML = `<table><thead><tr><th>Version</th><th>Platforms</th><th>Uploaded</th><th>Notes</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  $('#releasesBox').querySelectorAll('[data-live]').forEach(b => b.onclick = async () => {
+    if (!confirm(`Make ${b.dataset.live} the live release? Clients older than it will update to it.`)) return;
+    try { await postJson('releases/' + encodeURIComponent(b.dataset.live) + '/live'); setMsg($('#relMsg'), b.dataset.live + ' is now live.', true); }
+    catch (e) { setMsg($('#relMsg'), e.message); }
+    loadReleases();
+  });
+  $('#releasesBox').querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+    if (!confirm(`Delete release ${b.dataset.del} and its files? This cannot be undone.`)) return;
+    try { await postJson('releases/' + encodeURIComponent(b.dataset.del) + '/delete'); setMsg($('#relMsg'), b.dataset.del + ' deleted.', true); }
+    catch (e) { setMsg($('#relMsg'), e.message); }
+    loadReleases();
+  });
+}
+$('#unpublishBtn').onclick = async () => {
+  if (!confirm('Unpublish the live release? Clients will see no update until you make a release live again.')) return;
+  try { await postJson('unpublish'); setMsg($('#relMsg'), 'Unpublished. No update is offered now.', true); }
+  catch (e) { setMsg($('#relMsg'), e.message); }
+  loadReleases();
+};
+
+// ---------------------------------------------------------------- upload
+let chosen = [];
+function setFiles(list) {
+  chosen = Array.from(list);
+  $('#fileList').innerHTML = chosen.map(f => `<span class="chip">${esc(f.name)} · ${fmtSize(f.size)}</span>`).join('');
+  const hasLatest = chosen.some(f => f.name === 'latest.json');
+  $('#uploadBtn').disabled = !(hasLatest && chosen.length > 1);
+  setMsg($('#upMsg'), chosen.length && !hasLatest ? 'latest.json is required.' : '');
+}
+const drop = $('#drop');
+drop.onclick = () => $('#fileInput').click();
+$('#fileInput').onchange = (e) => setFiles(e.target.files);
+drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = () => drop.classList.remove('over');
+drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); setFiles(e.dataTransfer.files); };
+
+$('#uploadBtn').onclick = () => {
+  const fd = new FormData();
+  chosen.forEach(f => fd.append('file', f, f.name));
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/admin/api/releases?live=' + ($('#makeLive').checked ? 'true' : 'false'));
+  const prog = $('#prog'); prog.style.display = 'block'; prog.firstElementChild.style.width = '0';
+  $('#uploadBtn').disabled = true; setMsg($('#upMsg'), 'Uploading…', true);
+  xhr.upload.onprogress = (e) => { if (e.lengthComputable) prog.firstElementChild.style.width = (100 * e.loaded / e.total) + '%'; };
+  xhr.onload = () => {
+    let body = {}; try { body = JSON.parse(xhr.responseText); } catch (_) {}
+    if (xhr.status === 401) return showLogin();
+    if (xhr.status >= 200 && xhr.status < 300) {
+      setMsg($('#upMsg'), `Release ${body.release.version} uploaded and verified` + ($('#makeLive').checked ? ' — it is live now.' : '.'), true);
+      setFiles([]); $('#fileInput').value = '';
+    } else {
+      setMsg($('#upMsg'), body.error || ('Upload failed: HTTP ' + xhr.status));
+      $('#uploadBtn').disabled = false;
+    }
+    prog.style.display = 'none';
+  };
+  xhr.onerror = () => { setMsg($('#upMsg'), 'Upload failed (network error).'); $('#uploadBtn').disabled = false; prog.style.display = 'none'; };
+  xhr.send(fd);
+};
+
+// ---------------------------------------------------------------- stats
+function table(obj, label, sortByVersion) {
+  const entries = Object.entries(obj);
+  if (!entries.length) return '<div class="empty">No data yet.</div>';
+  entries.sort((a, b) => b[1] - a[1]);
+  const total = entries.reduce((s, e) => s + e[1], 0);
+  return `<table><thead><tr><th>${label}</th><th class="num">Count</th><th class="num">Share</th></tr></thead><tbody>` +
+    entries.map(([k, v]) => `<tr><td class="mono">${esc(k)}</td><td class="num">${fmtNum(v)}</td><td class="num">${(100 * v / total).toFixed(1)}%</td></tr>`).join('') +
+    '</tbody></table>';
+}
+async function loadStats() {
+  let s;
+  try { s = await api('stats?days=' + $('#range').value); } catch (e) { return; }
+  const todayTotal = Object.values(s.today_versions).reduce((a, b) => a + b, 0);
+  $('#tiles').innerHTML = [
+    ['Update checks', fmtNum(s.checks_total)],
+    ['Downloads', fmtNum(s.downloads_total)],
+    ['Checks today', fmtNum(todayTotal)],
+    ['Client versions seen', fmtNum(Object.keys(s.by_version).length)],
+  ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+  const max = Math.max(1, ...s.per_day.map(d => d.checks + d.downloads));
+  $('#chart').innerHTML = s.per_day.map(d =>
+    `<div class="col" title="${d.date}: ${d.checks} checks, ${d.downloads} downloads">
+       <div class="b2" style="height:${100 * d.downloads / max}%"></div>
+       <div class="b1" style="height:${100 * d.checks / max}%"></div></div>`).join('');
+  const pd = s.per_day;
+  $('#axis').innerHTML = pd.length ? `<span>${pd[0].date}</span><span>${pd[pd.length - 1].date}</span>` : '';
+  $('#byVersion').innerHTML = table(s.by_version, 'Client version');
+  $('#byPlatform').innerHTML = table(s.by_platform, 'Platform');
+  $('#byFile').innerHTML = table(s.by_file, 'File');
+}
+$('#range').onchange = loadStats;
+
+// ---------------------------------------------------------------- settings
+$('#tokenBtn').onclick = async () => {
+  if (!confirm('Generate a new upload token? The old one stops working.')) return;
+  try { const r = await postJson('token'); $('#tokenVal').textContent = r.token; $('#tokenOut').classList.remove('hidden'); }
+  catch (e) { alert(e.message); }
+};
+$('#pwForm').onsubmit = async (e) => {
+  e.preventDefault();
+  if ($('#pwNew').value !== $('#pwNew2').value) return setMsg($('#pwMsg'), 'The new passwords differ.');
+  try {
+    await postJson('password', { old: $('#pwOld').value, new: $('#pwNew').value });
+    ['#pwOld', '#pwNew', '#pwNew2'].forEach(s => $(s).value = '');
+    setMsg($('#pwMsg'), 'Password changed. Other sessions were signed out.', true);
+    $('#initWarn').classList.add('hidden');
+  } catch (err) { setMsg($('#pwMsg'), err.message); }
+};
+
+boot();
+</script>
+</body>
+</html>

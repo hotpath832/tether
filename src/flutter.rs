@@ -213,6 +213,30 @@ enum RenderType {
     Texture,
 }
 
+/// Tether: a copy of a decoded frame, kept for the Claude control's screenshots.
+#[derive(Default)]
+pub struct McpFrame {
+    pub w: usize,
+    pub h: usize,
+    pub stride: usize,
+    /// Byte order is R,G,B,A (else B,G,R,A).
+    pub rgba_order: bool,
+    pub data: Vec<u8>,
+    pub at: Option<std::time::Instant>,
+}
+
+/// Tether: per-session state for the Claude (MCP) control.
+#[derive(Default)]
+pub struct McpCapture {
+    /// Keep copies of frames (only while Claude uses this session).
+    pub enabled: AtomicBool,
+    /// Copy the next frame even if one was copied recently.
+    pub want: AtomicBool,
+    pub frames: std::sync::Mutex<HashMap<usize, McpFrame>>,
+    /// Last pointer position reported by the remote side.
+    pub cursor: std::sync::Mutex<Option<(i32, i32)>>,
+}
+
 #[derive(Clone)]
 pub struct FlutterHandler {
     // ui session id -> display handler data
@@ -222,6 +246,7 @@ pub struct FlutterHandler {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     hooks: Arc<RwLock<HashMap<String, SessionHook>>>,
     use_texture_render: Arc<AtomicBool>,
+    pub mcp: Arc<McpCapture>,
 }
 
 impl Default for FlutterHandler {
@@ -235,7 +260,53 @@ impl Default for FlutterHandler {
             use_texture_render: Arc::new(
                 AtomicBool::new(crate::ui_interface::use_texture_render()),
             ),
+            mcp: Default::default(),
         }
+    }
+}
+
+impl FlutterHandler {
+    /// Tether: displays of the peer as (x, y, width, height) in remote coordinates.
+    pub fn mcp_displays(&self) -> Vec<(i32, i32, i32, i32)> {
+        self.peer_info
+            .read()
+            .unwrap()
+            .displays
+            .iter()
+            .map(|d| (d.x, d.y, d.width, d.height))
+            .collect()
+    }
+
+    pub fn mcp_hostname(&self) -> String {
+        self.peer_info.read().unwrap().hostname.clone()
+    }
+
+    /// Tether: UI session ids of this connection (any of them reaches it).
+    pub fn mcp_session_ids(&self) -> Vec<SessionID> {
+        self.session_handlers.read().unwrap().keys().cloned().collect()
+    }
+
+    fn mcp_capture_frame(&self, display: usize, rgba: &scrap::ImageRgb) {
+        if !self.mcp.enabled.load(Ordering::Relaxed) || rgba.w == 0 || rgba.h == 0 {
+            return;
+        }
+        let want = self.mcp.want.swap(false, Ordering::Relaxed);
+        let mut frames = self.mcp.frames.lock().unwrap();
+        let f = frames.entry(display).or_default();
+        if !want
+            && f
+                .at
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(250))
+        {
+            return;
+        }
+        f.w = rgba.w;
+        f.h = rgba.h;
+        f.stride = rgba.raw.len() / rgba.h;
+        f.rgba_order = matches!(rgba.fmt, scrap::ImageFormat::ABGR);
+        f.data.clear();
+        f.data.extend_from_slice(&rgba.raw);
+        f.at = Some(std::time::Instant::now());
     }
 }
 
@@ -686,6 +757,7 @@ impl InvokeUiSession for FlutterHandler {
     }
 
     fn set_cursor_position(&self, cp: CursorPosition) {
+        *self.mcp.cursor.lock().unwrap() = Some((cp.x, cp.y));
         self.push_event(
             "cursor_position",
             &[("x", &cp.x.to_string()), ("y", &cp.y.to_string())],
@@ -862,6 +934,7 @@ impl InvokeUiSession for FlutterHandler {
     #[inline]
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     fn on_rgba(&self, display: usize, rgba: &mut scrap::ImageRgb) {
+        self.mcp_capture_frame(display, rgba);
         let use_texture_render = self.use_texture_render.load(Ordering::Relaxed);
         self.on_rgba_flutter_texture_render(use_texture_render, display, rgba);
         if !use_texture_render {

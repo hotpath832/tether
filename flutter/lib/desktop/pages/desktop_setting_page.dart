@@ -12,6 +12,8 @@ import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_home_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
+import 'package:flutter_hbb/desktop/widgets/update_progress.dart';
+import 'package:flutter_hbb/desktop/widgets/claude_control.dart';
 import 'package:flutter_hbb/mobile/widgets/dialog.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/printer_model.dart';
@@ -427,6 +429,11 @@ class _GeneralState extends State<_General> {
         if (!isWeb) audio(context),
         if (!isWeb) record(context),
         if (!isWeb) WaylandCard(),
+        if (!isWeb) _Card(title: 'Update', children: [const _TetherUpdate()]),
+        if (!isWeb && isDesktop)
+          _Card(
+              title: 'Claude control',
+              children: [const ClaudeControlSettings()]),
         other()
       ],
     ).marginOnly(bottom: _kListViewBottomMargin);
@@ -490,7 +497,6 @@ class _GeneralState extends State<_General> {
   Widget other() {
     final incomingOnly = bind.isIncomingOnly();
     final outgoingOnly = bind.isOutgoingOnly();
-    final showAutoUpdate = isWindows && bind.mainIsInstalled();
     final children = <Widget>[
       if (!isWeb && !incomingOnly)
         _OptionCheckBox(context, 'Confirm before closing multiple tabs',
@@ -549,20 +555,6 @@ class _GeneralState extends State<_General> {
             ),
           ),
       ],
-      if (!isWeb && !bind.isCustomClient())
-        _OptionCheckBox(
-          context,
-          'Check for software update on startup',
-          kOptionEnableCheckUpdate,
-          isServer: false,
-        ),
-      if (showAutoUpdate)
-        _OptionCheckBox(
-          context,
-          'Auto update',
-          kOptionAllowAutoUpdate,
-          isServer: true,
-        ),
       if (isWindows && !outgoingOnly)
         _OptionCheckBox(
           context,
@@ -3199,3 +3191,163 @@ void changeSocks5Proxy() async {
 }
 
 //#endregion
+
+// Tether: update server, auto update and "Check for updates" (see
+// src/tether_update.rs). Updates are signed; only Tether's releases install.
+class _TetherUpdate extends StatefulWidget {
+  const _TetherUpdate({Key? key}) : super(key: key);
+
+  @override
+  State<_TetherUpdate> createState() => _TetherUpdateState();
+}
+
+class _TetherUpdateState extends State<_TetherUpdate> {
+  static const _kOptUpdateServer = 'tether-update-server';
+  final _controller = TextEditingController();
+  String _saved = '';
+  bool _checking = false;
+  String _status = '';
+  bool _statusError = false;
+
+  @override
+  void initState() {
+    super.initState();
+    bind.mainGetOption(key: _kOptUpdateServer).then((v) {
+      if (!mounted) return;
+      setState(() {
+        _saved = v;
+        _controller.text = v;
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final v = _controller.text.trim();
+    await bind.mainSetOption(key: _kOptUpdateServer, value: v);
+    setState(() {
+      _saved = v;
+      _status = '';
+    });
+  }
+
+  Future<void> _check() async {
+    if (_controller.text.trim() != _saved) await _save();
+    setState(() {
+      _checking = true;
+      _status = '';
+    });
+    // Give the service a moment to receive a just-saved server address.
+    await Future.delayed(const Duration(milliseconds: 300));
+    final res = await bind.mainTetherCheckUpdate();
+    if (!mounted) return;
+    setState(() {
+      _checking = false;
+      _statusError = res.startsWith('error:');
+      if (res == 'error:no-server') {
+        _status = translate('Enter the update server address first.');
+      } else if (_statusError) {
+        _status =
+            '${translate('Failed to check for updates')}: ${res.substring(6)}';
+      } else if (res.isEmpty) {
+        _status = translate('Tether is up to date.');
+      } else {
+        _status = '${translate('New version available')}: $res';
+        stateGlobal.updateUrl.value = _latestUrl ?? '';
+      }
+    });
+  }
+
+  String? get _latestUrl {
+    final v = bind.mainGetCommonSync(key: 'tether-update-url');
+    return v.isEmpty ? null : v;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final showAutoUpdate = isWindows && bind.mainIsInstalled();
+    final newVersion = bind.mainGetNewVersion();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          Expanded(
+            child: TextField(
+              controller: _controller,
+              decoration: InputDecoration(
+                labelText: translate('Update server'),
+                hintText: 'https://example.com/tether',
+                isDense: true,
+              ),
+              onSubmitted: (_) => _save(),
+              onChanged: (_) => setState(() {}),
+            ),
+          ),
+          const SizedBox(width: 8),
+          ElevatedButton(
+            onPressed:
+                _controller.text.trim() == _saved ? null : () => _save(),
+            child: Text(translate('Save')),
+          ),
+        ]).marginOnly(left: _kContentHMargin, right: 8, bottom: 4),
+        _OptionCheckBox(
+          context,
+          'Check for software update on startup',
+          kOptionEnableCheckUpdate,
+          isServer: false,
+        ),
+        if (showAutoUpdate)
+          _OptionCheckBox(
+            context,
+            'Auto update',
+            kOptionAllowAutoUpdate,
+            isServer: true,
+          ),
+        Row(children: [
+          ElevatedButton(
+            onPressed: _checking ? null : _check,
+            child: Text(translate('Check for updates'))
+                .marginSymmetric(horizontal: 15),
+          ),
+          if (_checking)
+            const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                .marginOnly(left: 12),
+          if (!_checking && newVersion.isNotEmpty && !_statusError) ...[
+            const SizedBox(width: 8),
+            ElevatedButton(
+              onPressed: () {
+                final url = _latestUrl;
+                if (url == null) return;
+                if (isWindows && bind.mainIsInstalled()) {
+                  handleUpdate(url);
+                } else {
+                  launchUrlString(url);
+                }
+              },
+              child: Text(translate(isWindows && bind.mainIsInstalled()
+                      ? 'Update now'
+                      : 'Download'))
+                  .marginSymmetric(horizontal: 15),
+            ),
+          ],
+        ]).marginOnly(left: _kContentHMargin, top: 4),
+        if (_status.isNotEmpty)
+          Text(_status,
+                  style: TextStyle(
+                      color: _statusError ? Colors.red : null, fontSize: 13))
+              .marginOnly(left: _kContentHMargin, top: 6),
+        Text(translate('tether-update-tip'),
+                style: Theme.of(context).textTheme.bodySmall)
+            .marginOnly(left: _kContentHMargin, top: 6, right: 8),
+      ],
+    );
+  }
+}

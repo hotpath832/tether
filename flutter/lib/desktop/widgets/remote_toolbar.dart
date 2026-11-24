@@ -492,9 +492,11 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   Timer? _concealTimer;
 
   // Tether: auto-hide the toolbar whenever the remote window fills the screen —
-  // either true fullscreen or a maximized window.
+  // either true fullscreen or a maximized window. A pinned toolbar always stays
+  // visible. (`pin` reads an RxBool, so the Obx in build() reacts to pinning.)
   bool get _autoHideActive =>
-      stateGlobal.fullscreen.isTrue || stateGlobal.isMaximized.isTrue;
+      !pin &&
+      (stateGlobal.fullscreen.isTrue || stateGlobal.isMaximized.isTrue);
 
   void _reveal() {
     _concealTimer?.cancel();
