@@ -277,6 +277,10 @@ impl FlutterHandler {
             .collect()
     }
 
+    pub fn mcp_current_display(&self) -> i32 {
+        self.peer_info.read().unwrap().current_display
+    }
+
     pub fn mcp_hostname(&self) -> String {
         self.peer_info.read().unwrap().hostname.clone()
     }

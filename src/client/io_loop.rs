@@ -1543,6 +1543,12 @@ impl<T: InvokeUiSession> Remote<T> {
                         !lc.disable_clipboard.v && !lc.view_only.v
                     };
                     if clipboard_allowed {
+                        // Tether: Claude control's get_clipboard.
+                        #[cfg(all(feature = "flutter", not(any(target_os = "android", target_os = "ios"))))]
+                        crate::mcp_server::note_remote_clipboard(
+                            self.handler.get_id(),
+                            std::slice::from_ref(&cb),
+                        );
                         #[cfg(not(any(target_os = "android", target_os = "ios")))]
                         update_clipboard(vec![cb], ClipboardSide::Client);
                         #[cfg(target_os = "ios")]
@@ -1566,6 +1572,12 @@ impl<T: InvokeUiSession> Remote<T> {
                         !lc.disable_clipboard.v && !lc.view_only.v
                     };
                     if clipboard_allowed {
+                        // Tether: Claude control's get_clipboard.
+                        #[cfg(all(feature = "flutter", not(any(target_os = "android", target_os = "ios"))))]
+                        crate::mcp_server::note_remote_clipboard(
+                            self.handler.get_id(),
+                            &_mcb.clipboards,
+                        );
                         #[cfg(not(any(target_os = "android", target_os = "ios")))]
                         update_clipboard(_mcb.clipboards, ClipboardSide::Client);
                         #[cfg(target_os = "ios")]

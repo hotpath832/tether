@@ -14,6 +14,7 @@ on:
       - 'build.py'
       - 'Cargo.*'
       - 'hbb_common_fork.patch'
+      - 'vcpkg.json'
 
 jobs:
   build:
@@ -25,10 +26,12 @@ jobs:
             arch: arm64
             triplet: arm64-osx
             name: arm64
+            build_args: --hwcodec
           - os: macos-15-intel  # Intel (macos-13 runners were retired)
             arch: x86_64
             triplet: x64-osx
             name: x86_64
+            build_args: --hwcodec
           # EXPERIMENTAL: Intel build with the minimum lowered to 10.13 (High
           # Sierra). Flutter 3.24 officially needs 10.14, so this may fail to
           # build or crash at launch; it never blocks the other two.
@@ -152,7 +155,9 @@ jobs:
       - name: Build Tether macOS
         run: |
           export VCPKG_ROOT="$HOME/vcpkg"
-          python3 build.py --flutter
+          # --hwcodec: hardware video encode/decode (VideoToolbox) for faster
+          # sessions; left off the experimental 10.13 build.
+          python3 build.py --flutter ${{ matrix.build_args }}
 
       # Fail loudly if the lowered build still ends up gated or linked above
       # the target (the first 10.13 attempt silently shipped 10.14).

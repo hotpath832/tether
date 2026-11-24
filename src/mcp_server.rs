@@ -8,7 +8,8 @@
 //!   as programs (Claude Desktop); it forwards each message to that endpoint.
 //!
 //! Tools: list_sessions, screenshot, click, move_mouse, drag, scroll,
-//! type_text, press_keys, wait, wait_for_screen_change. Pointer coordinates are
+//! type_text, press_keys, wait, wait_for_screen_change, switch_display,
+//! set_clipboard, get_clipboard. Pointer coordinates are
 //! pixels of the latest screenshot of that session; they are mapped to the
 //! remote display. All input is human-like (see `human_input` and `auto_type`).
 //!
@@ -17,9 +18,11 @@
 //! Every tool call is logged (Settings > Claude control > Action log), and input
 //! actions are rate-limited.
 use crate::{
+    client::{Data, Interface},
     flutter::{sessions, FlutterSession},
     human_input::{Button, HumanInput},
 };
+use hbb_common::message_proto::{Clipboard, ClipboardFormat, Message};
 use hbb_common::{
     config::LocalConfig,
     log,
@@ -94,6 +97,40 @@ lazy_static::lazy_static! {
     static ref RATE: Mutex<VecDeque<Instant>> = Default::default();
     /// Screen signature at each peer's last screenshot (wait_for_screen_change).
     static ref SIGS: Mutex<HashMap<String, (usize, Vec<u8>)>> = Default::default();
+    /// Latest clipboard text each remote computer sent us (get_clipboard).
+    static ref REMOTE_CLIPBOARD: Mutex<HashMap<String, (String, Instant)>> = Default::default();
+}
+
+fn clipboard_text(cb: &Clipboard) -> Option<String> {
+    if cb.format.enum_value() != Ok(ClipboardFormat::Text) {
+        return None;
+    }
+    let bytes = if cb.compress {
+        hbb_common::compress::decompress(&cb.content)
+    } else {
+        cb.content.to_vec()
+    };
+    String::from_utf8(bytes).ok()
+}
+
+/// Called by the session loop for every clipboard update from the remote side.
+pub fn note_remote_clipboard(peer: String, clipboards: &[Clipboard]) {
+    if let Some(text) = clipboards.iter().find_map(clipboard_text) {
+        REMOTE_CLIPBOARD.lock().unwrap().insert(peer, (text, Instant::now()));
+    }
+}
+
+fn text_clipboard_msg(text: &str) -> Message {
+    let compressed = hbb_common::compress::compress(text.as_bytes());
+    let compress = compressed.len() < text.len();
+    let mut msg = Message::new();
+    msg.set_clipboard(Clipboard {
+        compress,
+        content: if compress { compressed } else { text.as_bytes().to_vec() }.into(),
+        format: ClipboardFormat::Text.into(),
+        ..Default::default()
+    });
+    msg
 }
 
 /// Called for every local mouse/keyboard event in a session window: Claude
@@ -181,6 +218,11 @@ fn describe(name: &str, args: &Value) -> String {
             args.get("timeout").and_then(Value::as_f64).unwrap_or(10.0)),
         "screenshot" => args.get("display").and_then(Value::as_u64)
             .map(|d| format!("display {d}")).unwrap_or_default(),
+        "switch_display" => format!("display {}", args.get("display").and_then(Value::as_u64).unwrap_or(0)),
+        "set_clipboard" => {
+            let t = st("text");
+            format!("\"{}\" ({} chars)", short(&t, 60), t.chars().count())
+        }
         _ => String::new(),
     }
 }
@@ -554,7 +596,8 @@ pointer movement, natural click and typing timing), so actions take a moment. Us
 for shortcuts (\"ctrl+s\", \"alt+tab\", \"enter\") and type_text for text. After an action \
 that opens or loads something, use wait_for_screen_change instead of a fixed wait. If the user \
 starts using the computer, your action is interrupted: wait, take a new screenshot, and only \
-continue when they have stopped.";
+continue when they have stopped. For long or exact text, set_clipboard and paste instead of \
+typing; to read text, copy it and use get_clipboard. Use switch_display for other monitors.";
 
 fn session_prop() -> Value {
     json!({ "type": "string", "description": "Peer ID from list_sessions. Optional when only one session is open." })
@@ -630,6 +673,27 @@ fn tool_list() -> Value {
             "inputSchema": { "type": "object", "properties": {
                 "session": s, "keys": { "type": "string" }
             }, "required": ["keys"] }
+        },
+        {
+            "name": "switch_display",
+            "description": "Show another monitor of the remote computer in the session (see `displays` in list_sessions). Take a screenshot afterwards.",
+            "inputSchema": { "type": "object", "properties": {
+                "session": s,
+                "display": { "type": "integer", "description": "Display index from list_sessions" }
+            }, "required": ["display"] }
+        },
+        {
+            "name": "set_clipboard",
+            "description": "Put text on the remote computer's clipboard. Then paste it with press_keys (\"ctrl+v\", or \"cmd+v\" on a Mac). Faster than type_text for long text, code or exact content.",
+            "inputSchema": { "type": "object", "properties": {
+                "session": s, "text": { "type": "string" }
+            }, "required": ["text"] }
+        },
+        {
+            "name": "get_clipboard",
+            "description": "Read the text most recently copied on the remote computer. Copy first (e.g. select text and press_keys \"ctrl+c\" / \"cmd+c\"), then call this.",
+            "inputSchema": { "type": "object", "properties": { "session": s } },
+            "annotations": { "readOnlyHint": true }
         },
         {
             "name": "wait_for_screen_change",
@@ -722,7 +786,9 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             Ok(text(format!("Waited {secs:.1} s")))
         }
         "wait_for_screen_change" => wait_for_screen_change(args),
-        "click" | "move_mouse" | "drag" | "scroll" | "type_text" | "press_keys" => {
+        "get_clipboard" => get_clipboard(args),
+        "switch_display" => switch_display(args),
+        "click" | "move_mouse" | "drag" | "scroll" | "type_text" | "press_keys" | "set_clipboard" => {
             let s = find_session(args)?;
             require_control(&s)?;
             let _one_at_a_time = ACTION.lock().unwrap();
@@ -762,9 +828,20 @@ fn list_sessions() -> Result<Value, String> {
                 .enumerate()
                 .map(|(i, d)| json!({ "index": i, "x": d.0, "y": d.1, "width": d.2, "height": d.3 }))
                 .collect();
+            let shown = s
+                .ui_handler
+                .mcp
+                .frames
+                .lock()
+                .unwrap()
+                .iter()
+                .max_by_key(|(_, f)| f.at)
+                .map(|(d, _)| *d as i64)
+                .unwrap_or_else(|| s.ui_handler.mcp_current_display() as i64);
             json!({
                 "session": peer_id(s),
                 "name": s.ui_handler.mcp_hostname(),
+                "shown_display": shown,
                 "os": s.peer_platform(),
                 "connected": s.sender.read().unwrap().is_some(),
                 "control_allowed": *s.server_keyboard_enabled.read().unwrap(),
@@ -988,6 +1065,49 @@ fn wait_for_screen_change(args: &Value) -> Result<Value, String> {
     Ok(Value::Array(content))
 }
 
+fn get_clipboard(args: &Value) -> Result<Value, String> {
+    let s = find_session(args)?;
+    let id = peer_id(&s);
+    match REMOTE_CLIPBOARD.lock().unwrap().get(&id) {
+        Some((t, at)) => {
+            let n = t.chars().count();
+            let shown: String = t.chars().take(20_000).collect();
+            Ok(json!([
+                { "type": "text", "text": format!(
+                    "Clipboard text from {id} ({n} characters, copied {:.0} s ago){}:",
+                    at.elapsed().as_secs_f64(),
+                    if n > 20_000 { ", first 20000 shown" } else { "" }) },
+                { "type": "text", "text": shown }
+            ]))
+        }
+        None => Err(
+            "No clipboard text from this computer yet. Copy something there first (select it and press ctrl+c, or cmd+c on a Mac), \
+             then call get_clipboard again. Clipboard sharing must be allowed for the session."
+                .into(),
+        ),
+    }
+}
+
+fn switch_display(args: &Value) -> Result<Value, String> {
+    let s = find_session(args)?;
+    require_control(&s)?;
+    let d = args
+        .get("display")
+        .and_then(Value::as_u64)
+        .ok_or("`display` is required")? as usize;
+    let count = s.ui_handler.mcp_displays().len();
+    if d >= count {
+        return Err(format!("display {d} does not exist (this computer has {count})"));
+    }
+    s.ui_handler.mcp.enabled.store(true, Ordering::Relaxed);
+    s.switch_display(d as i32);
+    // Old coordinates belong to the other monitor.
+    let id = peer_id(&s);
+    SHOTS.lock().unwrap().remove(&id);
+    SIGS.lock().unwrap().remove(&id);
+    Ok(text(format!("Switched the session to display {d}. Take a screenshot before acting.")))
+}
+
 /// Screenshot pixels -> remote coordinates.
 fn to_remote(id: &str, x: f64, y: f64) -> Result<(f64, f64), String> {
     let shot = SHOTS
@@ -1051,6 +1171,20 @@ fn act(name: &str, s: &FlutterSession, args: &Value, flag: &Arc<AtomicBool>) -> 
                 flag.clone(),
             )?;
             return Ok(text(format!("Typed {} characters", t.chars().count())));
+        }
+        "set_clipboard" => {
+            let t = args.get("text").and_then(Value::as_str).ok_or("`text` is required")?;
+            let allowed = *s.server_clipboard_enabled.read().unwrap()
+                && !s.lc.read().unwrap().disable_clipboard.v;
+            if !allowed {
+                return Err("clipboard sharing is turned off for this session (in Tether or on the remote side)".into());
+            }
+            s.send(Data::Message(text_clipboard_msg(t)));
+            REMOTE_CLIPBOARD.lock().unwrap().insert(id, (t.to_owned(), Instant::now()));
+            return Ok(text(format!(
+                "The remote clipboard now holds {} characters. Paste with ctrl+v (cmd+v on a Mac).",
+                t.chars().count()
+            )));
         }
         "press_keys" => {
             let keys = args.get("keys").and_then(Value::as_str).ok_or("`keys` is required")?;
@@ -1194,7 +1328,7 @@ mod tests {
         let r = handle_message(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).unwrap();
         let names: Vec<_> = r["result"]["tools"].as_array().unwrap().iter()
             .map(|t| t["name"].as_str().unwrap().to_owned()).collect();
-        for n in ["list_sessions", "screenshot", "click", "move_mouse", "drag", "scroll", "type_text", "press_keys", "wait", "wait_for_screen_change"] {
+        for n in ["list_sessions", "screenshot", "click", "move_mouse", "drag", "scroll", "type_text", "press_keys", "wait", "wait_for_screen_change", "switch_display", "set_clipboard", "get_clipboard"] {
             assert!(names.contains(&n.to_owned()), "{n}");
         }
         let r = handle_message(json!({"jsonrpc":"2.0","id":3,"method":"nope"})).unwrap();
@@ -1240,6 +1374,20 @@ mod tests {
         assert_eq!(v["result"]["isError"], false);
 
         assert!(post_local(port, "wrong", init).is_err());
+    }
+
+    #[test]
+    fn clipboard_round_trip() {
+        for t in ["short", &"long text that compresses well ".repeat(50)] {
+            let msg = text_clipboard_msg(t);
+            let cb = msg.clipboard().clone();
+            assert_eq!(clipboard_text(&cb).as_deref(), Some(t));
+            note_remote_clipboard("peer-cb".into(), &[cb]);
+            assert_eq!(REMOTE_CLIPBOARD.lock().unwrap()["peer-cb"].0, t);
+        }
+        let mut img = Clipboard::default();
+        img.format = ClipboardFormat::ImagePng.into();
+        assert!(clipboard_text(&img).is_none());
     }
 
     #[test]
