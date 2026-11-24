@@ -8,9 +8,14 @@
 //!   as programs (Claude Desktop); it forwards each message to that endpoint.
 //!
 //! Tools: list_sessions, screenshot, click, move_mouse, drag, scroll,
-//! type_text, press_keys, wait. Pointer coordinates are pixels of the latest
-//! screenshot of that session; they are mapped to the remote display. All input
-//! is human-like (see `human_input` and `auto_type`).
+//! type_text, press_keys, wait, wait_for_screen_change. Pointer coordinates are
+//! pixels of the latest screenshot of that session; they are mapped to the
+//! remote display. All input is human-like (see `human_input` and `auto_type`).
+//!
+//! The user always wins: any local mouse/keyboard input in a session interrupts
+//! Claude's action there, and new actions are refused for a few seconds after.
+//! Every tool call is logged (Settings > Claude control > Action log), and input
+//! actions are rate-limited.
 use crate::{
     flutter::{sessions, FlutterSession},
     human_input::{Button, HumanInput},
@@ -27,8 +32,9 @@ use hbb_common::{
     },
 };
 use serde_json::{json, Value};
+use crate::flutter_ffi::SessionID;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io::{BufRead, Read, Write},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -42,6 +48,11 @@ pub const OPT_TOKEN: &str = "tether-mcp-token";
 pub const OPT_PORT: &str = "tether-mcp-port";
 pub const OPT_WPM: &str = "tether-mcp-wpm";
 pub const OPT_MISTAKES: &str = "tether-mcp-mistakes";
+pub const OPT_MAX_PER_MIN: &str = "tether-mcp-max-per-min";
+const DEFAULT_MAX_PER_MIN: usize = 60;
+/// Claude waits this long after the user's last input in a session.
+const USER_QUIET: Duration = Duration::from_secs(3);
+const LOG_KEEP: usize = 500;
 pub const DEFAULT_PORT: u16 = 21190;
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const MAX_BODY: usize = 4 * 1024 * 1024;
@@ -71,6 +82,142 @@ lazy_static::lazy_static! {
     static ref STOP: Arc<AtomicBool> = Default::default();
     /// One action at a time.
     static ref ACTION: Mutex<()> = Default::default();
+    /// Server running (cheap check for the input hooks).
+    static ref RUNNING: AtomicBool = AtomicBool::new(false);
+    /// Last local (user) input per UI session.
+    static ref USER_INPUT: Mutex<HashMap<SessionID, Instant>> = Default::default();
+    /// The action in progress: its sessions and its interrupt switch.
+    static ref CURRENT: Mutex<Option<(Vec<SessionID>, Arc<AtomicBool>)>> = Default::default();
+    /// Recent tool calls for the action log.
+    static ref LOG: Mutex<VecDeque<Value>> = Default::default();
+    /// Times of recent input actions (rate limit).
+    static ref RATE: Mutex<VecDeque<Instant>> = Default::default();
+    /// Screen signature at each peer's last screenshot (wait_for_screen_change).
+    static ref SIGS: Mutex<HashMap<String, (usize, Vec<u8>)>> = Default::default();
+}
+
+/// Called for every local mouse/keyboard event in a session window: Claude
+/// backs off while the user is using that computer.
+pub fn note_user_input(sid: SessionID) {
+    if !RUNNING.load(Ordering::Relaxed) {
+        return;
+    }
+    USER_INPUT.lock().unwrap().insert(sid, Instant::now());
+    if let Some((sids, flag)) = CURRENT.lock().unwrap().as_ref() {
+        if sids.contains(&sid) {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+fn user_active(s: &FlutterSession) -> Option<Duration> {
+    let inputs = USER_INPUT.lock().unwrap();
+    s.ui_handler
+        .mcp_session_ids()
+        .iter()
+        .filter_map(|id| inputs.get(id))
+        .map(|t| t.elapsed())
+        .filter(|ago| *ago < USER_QUIET)
+        .min()
+}
+
+fn max_per_min() -> usize {
+    LocalConfig::get_option(OPT_MAX_PER_MIN)
+        .parse()
+        .ok()
+        .filter(|n: &usize| (1..=600).contains(n))
+        .unwrap_or(DEFAULT_MAX_PER_MIN)
+}
+
+/// Count an input action; Err when the per-minute limit is reached.
+fn take_rate_slot() -> Result<(), String> {
+    let limit = max_per_min();
+    let mut rate = RATE.lock().unwrap();
+    let now = Instant::now();
+    while rate.front().is_some_and(|t| now.duration_since(*t) > Duration::from_secs(60)) {
+        rate.pop_front();
+    }
+    if rate.len() >= limit {
+        let wait = 60 - now.duration_since(*rate.front().unwrap()).as_secs().min(60);
+        return Err(format!(
+            "Action limit reached ({limit} input actions per minute, set in Tether). Wait about {wait} s before the next action."
+        ));
+    }
+    rate.push_back(now);
+    Ok(())
+}
+
+fn short(s: &str, n: usize) -> String {
+    let mut out: String = s.chars().take(n).collect();
+    if s.chars().count() > n {
+        out.push('…');
+    }
+    out.replace('\n', "⏎")
+}
+
+/// One line describing a tool call for the log.
+fn describe(name: &str, args: &Value) -> String {
+    let n = |k: &str| args.get(k).and_then(Value::as_f64).map(|v| format!("{v:.0}")).unwrap_or_default();
+    let st = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or_default().to_owned();
+    match name {
+        "click" => {
+            let count = args.get("count").and_then(Value::as_u64).unwrap_or(1);
+            let b = st("button");
+            format!("({}, {}){}{}", n("x"), n("y"),
+                if b.is_empty() || b == "left" { String::new() } else { format!(" {b}") },
+                if count > 1 { format!(" x{count}") } else { String::new() })
+        }
+        "move_mouse" => format!("({}, {})", n("x"), n("y")),
+        "drag" => format!("({}, {}) -> ({}, {})", n("from_x"), n("from_y"), n("to_x"), n("to_y")),
+        "scroll" => format!("{} {} at ({}, {})", st("direction"),
+            args.get("amount").and_then(Value::as_u64).unwrap_or(3), n("x"), n("y")),
+        "type_text" => {
+            let t = st("text");
+            format!("\"{}\" ({} chars)", short(&t, 60), t.chars().count())
+        }
+        "press_keys" => st("keys"),
+        "wait" => format!("{} s", args.get("seconds").and_then(Value::as_f64).unwrap_or(0.0)),
+        "wait_for_screen_change" => format!("up to {} s",
+            args.get("timeout").and_then(Value::as_f64).unwrap_or(10.0)),
+        "screenshot" => args.get("display").and_then(Value::as_u64)
+            .map(|d| format!("display {d}")).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+fn log_call(name: &str, args: &Value, result: &Result<Value, String>, took: Duration) {
+    let session = args.get("session").and_then(Value::as_str).unwrap_or_default().to_owned();
+    let detail = describe(name, args);
+    let (ok, outcome) = match result {
+        Ok(v) => (true, v.as_array()
+            .and_then(|a| a.iter().find_map(|c| c.get("text").and_then(Value::as_str)))
+            .map(|t| short(t, 160))
+            .unwrap_or_default()),
+        Err(e) => (false, short(e, 200)),
+    };
+    log::info!("Claude control: {name} {session} {detail} -> {}{outcome}", if ok { "" } else { "ERROR " });
+    let mut log = LOG.lock().unwrap();
+    log.push_back(json!({
+        "time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        "tool": name,
+        "session": session,
+        "detail": detail,
+        "ok": ok,
+        "result": outcome,
+        "ms": took.as_millis() as u64,
+    }));
+    while log.len() > LOG_KEEP {
+        log.pop_front();
+    }
+}
+
+/// The action log (oldest first) for the settings page.
+pub fn action_log() -> Value {
+    Value::Array(LOG.lock().unwrap().iter().cloned().collect())
+}
+
+pub fn clear_action_log() {
+    LOG.lock().unwrap().clear();
 }
 
 // ---------------------------------------------------------------- settings
@@ -165,6 +312,7 @@ pub fn start() {
     match ready_rx.recv_timeout(Duration::from_secs(3)) {
         Ok(Ok(())) => {
             LAST_ERROR.lock().unwrap().clear();
+            RUNNING.store(true, Ordering::SeqCst);
             *server = Some(Running {
                 port,
                 shutdown: Some(tx),
@@ -183,6 +331,10 @@ pub fn start() {
 
 pub fn stop() {
     STOP.store(true, Ordering::SeqCst);
+    RUNNING.store(false, Ordering::SeqCst);
+    if let Some((_, flag)) = CURRENT.lock().unwrap().as_ref() {
+        flag.store(true, Ordering::SeqCst);
+    }
     if let Some(mut r) = SERVER.lock().unwrap().take() {
         if let Some(tx) = r.shutdown.take() {
             let _ = tx.send(());
@@ -379,7 +531,10 @@ fn handle_one(msg: Value) -> Option<Value> {
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or_default();
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            match call_tool(name, &args) {
+            let began = Instant::now();
+            let result = call_tool(name, &args);
+            log_call(name, &args, &result, began.elapsed());
+            match result {
                 Ok(content) => json!({ "content": content, "isError": false }),
                 Err(e) => json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
             }
@@ -396,7 +551,10 @@ Start with list_sessions, then take a screenshot. All x/y coordinates are pixels
 recent screenshot of that session, so take a new screenshot whenever the screen may have \
 changed and before clicking. Mouse and keyboard input is performed like a person (curved \
 pointer movement, natural click and typing timing), so actions take a moment. Use press_keys \
-for shortcuts (\"ctrl+s\", \"alt+tab\", \"enter\") and type_text for text.";
+for shortcuts (\"ctrl+s\", \"alt+tab\", \"enter\") and type_text for text. After an action \
+that opens or loads something, use wait_for_screen_change instead of a fixed wait. If the user \
+starts using the computer, your action is interrupted: wait, take a new screenshot, and only \
+continue when they have stopped.";
 
 fn session_prop() -> Value {
     json!({ "type": "string", "description": "Peer ID from list_sessions. Optional when only one session is open." })
@@ -472,6 +630,16 @@ fn tool_list() -> Value {
             "inputSchema": { "type": "object", "properties": {
                 "session": s, "keys": { "type": "string" }
             }, "required": ["keys"] }
+        },
+        {
+            "name": "wait_for_screen_change",
+            "description": "Wait until the remote screen has changed since your last screenshot (a window opened, a page loaded) and then settled, up to `timeout` seconds. Returns a fresh screenshot by default. Prefer this over fixed waits.",
+            "inputSchema": { "type": "object", "properties": {
+                "session": s,
+                "timeout": { "type": "number", "description": "Seconds to wait at most (default 10, max 30)" },
+                "screenshot": { "type": "boolean", "description": "Return a screenshot afterwards (default true)" }
+            } },
+            "annotations": { "readOnlyHint": true }
         },
         {
             "name": "wait",
@@ -553,11 +721,31 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             }
             Ok(text(format!("Waited {secs:.1} s")))
         }
+        "wait_for_screen_change" => wait_for_screen_change(args),
         "click" | "move_mouse" | "drag" | "scroll" | "type_text" | "press_keys" => {
             let s = find_session(args)?;
             require_control(&s)?;
             let _one_at_a_time = ACTION.lock().unwrap();
-            act(name, &s, args)
+            if let Some(ago) = user_active(&s) {
+                return Err(format!(
+                    "The user is using this computer in Tether right now (last input {:.1} s ago). \
+                     Don't take over: wait a few seconds, take a new screenshot, and try again when they have stopped.",
+                    ago.as_secs_f64()
+                ));
+            }
+            take_rate_slot()?;
+            let flag = Arc::new(AtomicBool::new(false));
+            *CURRENT.lock().unwrap() = Some((s.ui_handler.mcp_session_ids(), flag.clone()));
+            let result = act(name, &s, args, &flag);
+            *CURRENT.lock().unwrap() = None;
+            if flag.load(Ordering::SeqCst) && RUNNING.load(Ordering::SeqCst) {
+                return Err(
+                    "Interrupted: the user took over the mouse/keyboard in Tether. The action may be \
+                     incomplete. Wait until they stop, take a new screenshot, then continue."
+                        .into(),
+                );
+            }
+            result
         }
         _ => Err(format!("unknown tool {name}")),
     }
@@ -632,6 +820,9 @@ fn screenshot(args: &Value) -> Result<Value, String> {
                 .map(|(d, f)| (*d, f))
                 .ok_or("no picture yet")?,
         };
+        if let Some(sig) = frame_sig(f) {
+            SIGS.lock().unwrap().insert(peer_id(&s), (display, sig));
+        }
         (display, frame_to_rgb(f)?)
     };
     let (fw, fh) = (img.width(), img.height());
@@ -685,6 +876,118 @@ fn frame_to_rgb(f: &crate::flutter::McpFrame) -> Result<image::RgbImage, String>
     image::RgbImage::from_raw(f.w as u32, f.h as u32, out).ok_or_else(|| "bad picture".into())
 }
 
+const SIG_W: usize = 48;
+const SIG_H: usize = 30;
+
+/// A coarse brightness grid of a frame: cheap to compare, blind to a blinking
+/// caret but not to a window opening or a page loading.
+fn frame_sig(f: &crate::flutter::McpFrame) -> Option<Vec<u8>> {
+    if f.w < SIG_W || f.h < SIG_H || f.stride < f.w * 4 || f.data.len() < f.stride * f.h {
+        return None;
+    }
+    let mut sig = Vec::with_capacity(SIG_W * SIG_H);
+    for gy in 0..SIG_H {
+        for gx in 0..SIG_W {
+            let (x0, y0) = (gx * f.w / SIG_W, gy * f.h / SIG_H);
+            let (cw, ch) = (f.w / SIG_W, f.h / SIG_H);
+            let mut sum = 0u32;
+            for sy in 0..4 {
+                for sx in 0..4 {
+                    let x = x0 + (sx * 2 + 1) * cw / 8;
+                    let y = y0 + (sy * 2 + 1) * ch / 8;
+                    let i = y * f.stride + x * 4;
+                    let p = &f.data[i..i + 3];
+                    sum += (p[0] as u32 * 3 + p[1] as u32 * 6 + p[2] as u32) / 10;
+                }
+            }
+            sig.push((sum / 16) as u8);
+        }
+    }
+    Some(sig)
+}
+
+fn sig_differs(a: &[u8], b: &[u8]) -> bool {
+    a.len() != b.len() || a.iter().zip(b).filter(|(x, y)| x.abs_diff(**y) > 10).count() >= 3
+}
+
+fn current_sig(s: &FlutterSession, display: Option<usize>) -> Option<(usize, Vec<u8>)> {
+    let frames = s.ui_handler.mcp.frames.lock().unwrap();
+    let (d, f) = match display {
+        Some(d) => (d, frames.get(&d)?),
+        None => frames.iter().max_by_key(|(_, f)| f.at).map(|(d, f)| (*d, f))?,
+    };
+    frame_sig(f).map(|sig| (d, sig))
+}
+
+fn wait_for_screen_change(args: &Value) -> Result<Value, String> {
+    let s = find_session(args)?;
+    let id = peer_id(&s);
+    let timeout = args.get("timeout").and_then(Value::as_f64).unwrap_or(10.0).clamp(1.0, 30.0);
+    let mcp = s.ui_handler.mcp.clone();
+    mcp.enabled.store(true, Ordering::Relaxed);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs_f64(timeout);
+    let pause = |ms: u64| -> Result<(), String> {
+        mcp.want.store(true, Ordering::Relaxed);
+        let end = Instant::now() + Duration::from_millis(ms);
+        while Instant::now() < end {
+            if STOP.load(Ordering::SeqCst) && !RUNNING.load(Ordering::SeqCst) {
+                return Err("stopped".into());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(())
+    };
+    // Compare with the last screenshot Claude saw; without one, with now.
+    let baseline = SIGS.lock().unwrap().get(&id).cloned();
+    let (display, base) = match baseline {
+        Some(b) => b,
+        None => {
+            pause(300)?;
+            current_sig(&s, None).ok_or("no picture from the remote screen yet")?
+        }
+    };
+    let mut changed = false;
+    while Instant::now() < deadline {
+        pause(150)?;
+        if let Some((_, sig)) = current_sig(&s, Some(display)) {
+            if sig_differs(&base, &sig) {
+                changed = true;
+                break;
+            }
+        }
+    }
+    let mut settled = false;
+    if changed {
+        // Then wait until two looks 300 ms apart agree.
+        let mut last = current_sig(&s, Some(display)).map(|x| x.1);
+        while Instant::now() < deadline {
+            pause(300)?;
+            let now = current_sig(&s, Some(display)).map(|x| x.1);
+            if let (Some(a), Some(b)) = (&last, &now) {
+                if !sig_differs(a, b) {
+                    settled = true;
+                    break;
+                }
+            }
+            last = now;
+        }
+    }
+    let secs = started.elapsed().as_secs_f64();
+    let summary = match (changed, settled) {
+        (true, true) => format!("The screen changed and settled after {secs:.1} s."),
+        (true, false) => format!("The screen changed but was still changing after {secs:.1} s."),
+        _ => format!("No change on the screen within {timeout:.0} s."),
+    };
+    if args.get("screenshot").and_then(Value::as_bool) == Some(false) {
+        return Ok(text(summary));
+    }
+    let shot = screenshot(&json!({ "session": id, "display": display }))?;
+    let mut content = vec![json!({ "type": "text", "text": summary })];
+    content.extend(shot.as_array().cloned().unwrap_or_default());
+    Ok(Value::Array(content))
+}
+
 /// Screenshot pixels -> remote coordinates.
 fn to_remote(id: &str, x: f64, y: f64) -> Result<(f64, f64), String> {
     let shot = SHOTS
@@ -722,9 +1025,9 @@ fn start_pointer(s: &FlutterSession, id: &str) -> (f64, f64) {
         .unwrap_or((0.0, 0.0))
 }
 
-fn act(name: &str, s: &FlutterSession, args: &Value) -> Result<Value, String> {
+fn act(name: &str, s: &FlutterSession, args: &Value, flag: &Arc<AtomicBool>) -> Result<Value, String> {
     let id = peer_id(s);
-    let stop: &AtomicBool = &STOP;
+    let stop: &AtomicBool = flag;
     let stopped = |_| "stopped".to_owned();
     match name {
         "type_text" => {
@@ -745,7 +1048,7 @@ fn act(name: &str, s: &FlutterSession, args: &Value) -> Result<Value, String> {
                     start_delay: 0,
                     think_pauses: true,
                 },
-                STOP.clone(),
+                flag.clone(),
             )?;
             return Ok(text(format!("Typed {} characters", t.chars().count())));
         }
@@ -891,7 +1194,7 @@ mod tests {
         let r = handle_message(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).unwrap();
         let names: Vec<_> = r["result"]["tools"].as_array().unwrap().iter()
             .map(|t| t["name"].as_str().unwrap().to_owned()).collect();
-        for n in ["list_sessions", "screenshot", "click", "move_mouse", "drag", "scroll", "type_text", "press_keys", "wait"] {
+        for n in ["list_sessions", "screenshot", "click", "move_mouse", "drag", "scroll", "type_text", "press_keys", "wait", "wait_for_screen_change"] {
             assert!(names.contains(&n.to_owned()), "{n}");
         }
         let r = handle_message(json!({"jsonrpc":"2.0","id":3,"method":"nope"})).unwrap();
@@ -937,6 +1240,36 @@ mod tests {
         assert_eq!(v["result"]["isError"], false);
 
         assert!(post_local(port, "wrong", init).is_err());
+    }
+
+    #[test]
+    fn rate_limit_and_log() {
+        RATE.lock().unwrap().clear();
+        for _ in 0..DEFAULT_MAX_PER_MIN {
+            take_rate_slot().unwrap();
+        }
+        assert!(take_rate_slot().unwrap_err().contains("limit"));
+        RATE.lock().unwrap().clear();
+
+        let args = json!({"session": "1", "text": "hello\nworld"});
+        log_call("type_text", &args, &Ok(text("Typed 11 characters")), Duration::from_millis(5));
+        let last = action_log().as_array().unwrap().last().cloned().unwrap();
+        assert_eq!(last["tool"], "type_text");
+        assert!(last["detail"].as_str().unwrap().contains("11 chars"));
+        assert_eq!(last["ok"], true);
+    }
+
+    #[test]
+    fn signature_sees_windows_not_carets() {
+        let mut f = crate::flutter::McpFrame { w: 960, h: 600, stride: 960 * 4, rgba_order: true,
+            data: vec![200u8; 960 * 600 * 4], at: None };
+        let a = frame_sig(&f).unwrap();
+        // A caret: 2x18 px.
+        for y in 100..118 { for x in 300..302 { let i = y * f.stride + x * 4; f.data[i..i + 3].fill(0); } }
+        assert!(!sig_differs(&a, &frame_sig(&f).unwrap()));
+        // A window: 300x200 px.
+        for y in 200..400 { for x in 300..600 { let i = y * f.stride + x * 4; f.data[i..i + 3].fill(40); } }
+        assert!(sig_differs(&a, &frame_sig(&f).unwrap()));
     }
 
     #[test]

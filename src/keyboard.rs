@@ -998,6 +998,9 @@ pub fn send_key_event(key_event: &KeyEvent) {
 
     #[cfg(feature = "flutter")]
     if let Some(session) = flutter::get_cur_session() {
+        // Tether: the user is typing here; Claude control backs off.
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        crate::mcp_server::note_user_input(flutter::get_cur_session_id());
         session.send_key_event(key_event);
     }
 }

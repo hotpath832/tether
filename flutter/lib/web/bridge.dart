@@ -1167,6 +1167,8 @@ class RustdeskImpl {
   String mainMcpInfo({dynamic hint}) => '{}';
   String mainMcpSetEnabled({required bool enabled, dynamic hint}) => '{}';
   String mainMcpNewToken({dynamic hint}) => '{}';
+  String mainMcpLog({dynamic hint}) => '[]';
+  Future<void> mainMcpClearLog({dynamic hint}) => Future.value();
   Future<void> mainMcpStartIfEnabled({dynamic hint}) => Future.value();
 
   Future<String> mainTetherCheckUpdate({dynamic hint}) {

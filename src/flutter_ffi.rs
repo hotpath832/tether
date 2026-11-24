@@ -574,6 +574,8 @@ pub fn session_handle_flutter_key_event(
     lock_modes: i32,
     down_or_up: bool,
 ) {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    crate::mcp_server::note_user_input(session_id);
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         let keyboard_mode = session.get_keyboard_mode();
         session.handle_flutter_key_event(
@@ -594,6 +596,8 @@ pub fn session_handle_flutter_raw_key_event(
     lock_modes: i32,
     down_or_up: bool,
 ) {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    crate::mcp_server::note_user_input(session_id);
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         let keyboard_mode = session.get_keyboard_mode();
         session.handle_flutter_raw_key_event(
@@ -646,6 +650,8 @@ pub fn session_input_key(
     shift: bool,
     command: bool,
 ) {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    crate::mcp_server::note_user_input(session_id);
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         // #[cfg(any(target_os = "android", target_os = "ios"))]
         session.input_key(&name, down, press, alt, ctrl, shift, command);
@@ -653,6 +659,8 @@ pub fn session_input_key(
 }
 
 pub fn session_input_string(session_id: SessionID, value: String) {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    crate::mcp_server::note_user_input(session_id);
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         // #[cfg(any(target_os = "android", target_os = "ios"))]
         session.input_string(&value);
@@ -1818,6 +1826,19 @@ pub fn main_mcp_new_token() -> SyncReturn<String> {
     SyncReturn("{}".to_owned())
 }
 
+/// Tether: Claude control action log (JSON array, oldest first).
+pub fn main_mcp_log() -> SyncReturn<String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    return SyncReturn(crate::mcp_server::action_log().to_string());
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    SyncReturn("[]".to_owned())
+}
+
+pub fn main_mcp_clear_log() {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    crate::mcp_server::clear_action_log();
+}
+
 /// Tether: start Claude control at app start when it is turned on.
 pub fn main_mcp_start_if_enabled() {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1971,6 +1992,8 @@ pub fn main_load_group() -> String {
 }
 
 pub fn session_send_pointer(session_id: SessionID, msg: String) {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    crate::mcp_server::note_user_input(session_id);
     super::flutter::session_send_pointer(session_id, msg);
 }
 
@@ -2003,6 +2026,8 @@ pub fn session_send_pointer(session_id: SessionID, msg: String) {
 /// If these assumptions are violated (e.g., `relative_mouse_mode` is added to normal events),
 /// legitimate mouse events may be silently dropped by the early-return logic below.
 pub fn session_send_mouse(session_id: SessionID, msg: String) {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    crate::mcp_server::note_user_input(session_id);
     if let Ok(m) = serde_json::from_str::<HashMap<String, String>>(&msg) {
         // Relative mouse mode marker validation (Flutter-only).
         // This only validates and filters markers; the server tracks per-connection
